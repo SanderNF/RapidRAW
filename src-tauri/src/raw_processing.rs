@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use image::{DynamicImage, ImageBuffer, Rgba};
 use rawler::{
     decoders::{Orientation, RawDecodeParams},
-    imgop::develop::{DemosaicAlgorithm, Intermediate, ProcessingStep, RawDevelop},
+    imgop::develop::{Intermediate, ProcessingStep, RawDevelop},
     rawimage::{RawImage, RawPhotometricInterpretation},
     rawsource::RawSource,
 };
@@ -64,7 +64,8 @@ fn develop_internal(
     let decoder = rawler::get_decoder(&source)?;
 
     check_cancel()?;
-    let mut raw_image: RawImage = decoder.raw_image(&source, &RawDecodeParams::default(), false)?;
+    let mut raw_image: RawImage =
+        decoder.raw_image(&source, &RawDecodeParams::default(), false)?;
 
     let metadata = decoder.raw_metadata(&source, &RawDecodeParams::default())?;
     let orientation = metadata
@@ -88,6 +89,7 @@ fn develop_internal(
         .get(0)
         .cloned()
         .unwrap_or(u16::MAX as u32) as f32;
+
     let original_black_level = raw_image
         .blacklevel
         .levels
@@ -102,16 +104,25 @@ fn develop_internal(
     let mut developer = RawDevelop::default();
 
     if is_linear_format {
-        developer.steps.retain(|&step| {
-            step != ProcessingStep::SRgb
-                && step != ProcessingStep::Demosaic
-                && (apply_calibration || step != ProcessingStep::Calibrate)
+        developer.steps.retain(|step| {
+            *step != ProcessingStep::SRgb
+                && *step != ProcessingStep::Demosaic
+                && (apply_calibration || *step != ProcessingStep::Calibrate)
         });
-    } else if fast_demosaic {
-        developer.demosaic_algorithm = DemosaicAlgorithm::Speed;
-        developer.steps.retain(|&step| step != ProcessingStep::SRgb);
     } else {
-        developer.steps.retain(|&step| step != ProcessingStep::SRgb);
+        developer
+            .steps
+            .retain(|step| *step != ProcessingStep::SRgb);
+
+        if fast_demosaic {
+            developer.steps = developer.steps.iter().map(|step| {
+                if matches!(step, ProcessingStep::Demosaic) {
+                    ProcessingStep::Demosaic
+                } else {
+                    step.clone()
+                }
+            }).collect();
+        }
     }
 
     check_cancel()?;
@@ -153,12 +164,13 @@ fn develop_internal(
                     let min_c = r.min(g).min(b);
                     let compression_factor = (1.0
                         - (max_c - 1.0) / (safe_highlight_compression - 1.0))
-                        .max(0.0)
-                        .min(1.0);
+                        .clamp(0.0, 1.0);
+
                     let compressed_r = min_c + (r - min_c) * compression_factor;
                     let compressed_g = min_c + (g - min_c) * compression_factor;
                     let compressed_b = min_c + (b - min_c) * compression_factor;
-                    let compressed_max = compressed_r.max(compressed_g).max(compressed_b);
+                    let compressed_max =
+                        compressed_r.max(compressed_g).max(compressed_b);
 
                     if compressed_max > 1e-6 {
                         let rescale = max_c / compressed_max;
@@ -192,31 +204,29 @@ fn develop_internal(
         }
     }
 
-    let (width, height) = {
-        let dim = developed_intermediate.dim();
-        (dim.w as u32, dim.h as u32)
-    };
+    let dim = developed_intermediate.dim();
+    let (width, height) = (dim.w as u32, dim.h as u32);
 
     check_cancel()?;
 
     let dynamic_image = match developed_intermediate {
         Intermediate::ThreeColor(pixels) => {
-            let buffer = ImageBuffer::<Rgba<f32>, _>::from_fn(width, height, |x, y| {
-                let p = pixels.data[(y * width + x) as usize];
-                Rgba([p[0], p[1], p[2], 1.0])
-            });
+            let buffer =
+                ImageBuffer::<Rgba<f32>, _>::from_fn(width, height, |x, y| {
+                    let p = pixels.data[(y * width + x) as usize];
+                    Rgba([p[0], p[1], p[2], 1.0])
+                });
             DynamicImage::ImageRgba32F(buffer)
         }
         Intermediate::Monochrome(pixels) => {
-            let buffer = ImageBuffer::<Rgba<f32>, _>::from_fn(width, height, |x, y| {
-                let p = pixels.data[(y * width + x) as usize];
-                Rgba([p, p, p, 1.0])
-            });
+            let buffer =
+                ImageBuffer::<Rgba<f32>, _>::from_fn(width, height, |x, y| {
+                    let p = pixels.data[(y * width + x) as usize];
+                    Rgba([p, p, p, 1.0])
+                });
             DynamicImage::ImageRgba32F(buffer)
         }
-        _ => {
-            return Err(anyhow!("Unsupported intermediate format for conversion"));
-        }
+        _ => return Err(anyhow!("Unsupported intermediate format")),
     };
 
     Ok((dynamic_image, orientation))
